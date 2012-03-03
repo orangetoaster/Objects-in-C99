@@ -21,7 +21,7 @@
  *   C allows encapsulation by only declaring what is public in the included .h file, and keeping what is private unannounced in the .c file.
  *   This prevents other programmers from accidentally using private members.
  *   C offers even more, if the .c files are not provided and a library is provided instead, then the .c contents are not even known; providing binary encapsulation.
- *   C++ does not have binary encapsulation, Java does not even have runtime encapsulation (reflection). Python does not have any encapsulation.
+ *   C++ does not have binary encapsulation, Java does not have runtime encapsulation (reflection). Python does not have any encapsulation.
  *  Delegation:
  *   Delegation is used to simplify the current task by letting some subsystem or shared subset of code do the work for you.
  *   This allows the DRY principle to be upheld.
@@ -39,7 +39,7 @@
 
 // Object System - declare publicly in object.h //
 typedef struct iface {
-    char placeholder;
+    size_t vtable_size;
 } iface;
 
 typedef struct impl {
@@ -47,14 +47,9 @@ typedef struct impl {
     void * vtable;
 } impl;
 
-impl null_iface = {
-    .type = NULL,
-    .vtable = NULL
-};
-
 typedef struct class {
     size_t instance_size;
-    unsigned int interface_count;
+    unsigned char interface_count; // 256 ifaces is reasonable
     impl *interfaces;
 } class;
 
@@ -63,36 +58,40 @@ typedef struct object {
     void * instance;
 } object;
 
-impl * has_iface(object self, iface *interface) {
-    unsigned int i=0;
+impl has_iface(object self, iface *interface) {
+    unsigned char i=0;
     for(i=0; i < self.type->interface_count; ++i) {
-        if(self.type->interfaces[i].type == interface) return &self.type->interfaces[i];
+        if(self.type->interfaces[i].type == interface) return self.type->interfaces[i];
     }
-    return &null_iface;
+    return (impl) { .type = NULL, .vtable = NULL };
+}
+
+int iface_isnull(impl interface) {
+    return interface.vtable == NULL;
 }
 
 // Polymorphic Printer - declare publicly in println.h //
-iface printable_iface = { };
+typedef struct printable_vtable {
+    void (*toString) (object self, size_t length, char * buf);
+} printable_vtable;
 
-struct printable_vtable {
-    void (*toString) (object self, char * buf, int length);
-};
+iface printable_iface = { .vtable_size = sizeof(printable_vtable) };
 
 void println(object self, impl contract);
 
 // Polymorphic Printer - encapsulate privately in println.c //
 void println(object self, impl contract) {
     assert(contract.type = &printable_iface);
-    struct printable_vtable *v = (struct printable_vtable *) contract.vtable;
+    printable_vtable *v = (printable_vtable *) contract.vtable;
     char buf[] = { '\0', '\n' };
-    v->toString(self, buf, 2);
+    v->toString(self, 2, buf);
     write(1, buf, 2);
 }
 
 // Number Contract - declare publicly in number.h //
 class number_class;
-struct number;
-struct printable_vtable number_printable_vtable;
+impl number_printable_impl;
+printable_vtable number_printable_vtable;
 
 object new_number(int value);
 void destroy_number(object * self);
@@ -106,10 +105,9 @@ struct number {
 };
 
 object new_number(int value) {
-    struct number * self = calloc(1, sizeof(struct number) );
+    struct number * self = malloc( sizeof(struct number) );
     self->representation = value;
-    struct object o_self = { &number_class, self };
-    return o_self;
+    return (object) { .type = &number_class, .instance = self };
 }
 
 void destroy_number(object * self) {
@@ -117,7 +115,8 @@ void destroy_number(object * self) {
     self->instance = 0;
 }
 
-void number_print ( object _self, char * buf, int length ) { // note that this is publicly accessible but not publicly declared.
+// note that this is publicly accessible but not publicly declared.
+void number_print ( object _self, size_t length, char * buf ) { 
     assert(_self.type == &number_class);
     struct number * self = (struct number *) _self.instance;
     if(length > 1) {
@@ -125,16 +124,15 @@ void number_print ( object _self, char * buf, int length ) { // note that this i
     }
 }
 
-struct printable_vtable number_printable_vtable = {
+printable_vtable number_printable_vtable = {
     .toString = &number_print
 };
 
 impl new_runtime_number_print_iface(object _self) {
-    assert(_self.type = &number_class);
-    struct printable_vtable * vtable = calloc(1, sizeof(struct printable_vtable));
+    assert(_self.type == &number_class);
+    printable_vtable * vtable = malloc( sizeof(printable_vtable) );
     vtable->toString = &number_print;
-    impl implementation = { &printable_iface, vtable };
-    return implementation;
+    return (impl) { .type = &printable_iface, .vtable = vtable };
 }
 
 void destroy_number_print_iface(impl *generated) {
@@ -143,7 +141,7 @@ void destroy_number_print_iface(impl *generated) {
 }
 
 impl number_printable_impl = { .type = &printable_iface, .vtable = &number_printable_vtable };
-impl number_interfaces[] = {
+static impl number_interfaces[] = {
     { .type = &printable_iface, .vtable = &number_printable_vtable }
 };
 
@@ -156,12 +154,12 @@ class number_class = {
 // Example Usage //
 int main() {
     object num = new_number(3);
-    // runtime class-generated vtable //
+    // runtime class-generated vtable - java style (except java leaves it for the gc to collect) //
     impl generated = new_runtime_number_print_iface(num);
     println(num, generated);
     destroy_number_print_iface(&generated);
-    // runtime call-generated vtable //
-    struct printable_vtable my_num_vtable = {
+    // runtime call-generated vtable - ducktyping style (ruby, php, go), also like using reflection in java //
+    printable_vtable my_num_vtable = {
         .toString = number_printable_vtable.toString
     };
     impl my_printable_implementation = {
@@ -172,9 +170,9 @@ int main() {
     // compiletime vtable - C++ style //
     println(num, number_printable_impl);
     // message passing - objective-c style //
-    impl *contract;
-    if((contract = has_iface(num, &printable_iface)) != &null_iface) {
-        println(num, *contract);
+    impl contract;
+    if(!iface_isnull(contract = has_iface(num, &printable_iface))) {
+        println(num, contract);
     }
     destroy_number(&num);
     return 0;
